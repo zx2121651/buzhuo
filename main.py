@@ -1,3 +1,10 @@
+import cv2
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap
+
 import sys
 from PyQt6.QtWidgets import (
     QApplication,
@@ -14,8 +21,84 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 
+class PoseCaptureThread(QThread):
+    change_pixmap_signal = pyqtSignal(QImage)
+
+    def __init__(self):
+        import os
+        import urllib.request
+
+        model_path = "pose_landmarker_full.task"
+        if not os.path.exists(model_path):
+            url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
+            urllib.request.urlretrieve(url, model_path)
+        super().__init__()
+        self._run_flag = True
+
+        # Initialize the PoseLandmarker
+        base_options = python.BaseOptions(model_asset_path="pose_landmarker_full.task")
+        options = vision.PoseLandmarkerOptions(
+            base_options=base_options, running_mode=vision.RunningMode.VIDEO
+        )
+        self.detector = vision.PoseLandmarker.create_from_options(options)
+
+    def run(self):
+        cap = cv2.VideoCapture(0)
+
+        while self._run_flag:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            # Convert to RGB and wrap into MediaPipe Image
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+
+            # Timestamp for VIDEO mode
+            timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
+            if timestamp_ms <= getattr(self, "last_timestamp_ms", -1):
+                timestamp_ms = getattr(self, "last_timestamp_ms", -1) + 1
+            self.last_timestamp_ms = timestamp_ms
+
+            # Make detection
+            # Make detection
+            detection_result = self.detector.detect_for_video(mp_image, timestamp_ms)
+
+            # Draw landmarks (since mp.solutions is not directly available, draw manually or just show feed)
+            if detection_result.pose_landmarks:
+                for pose_landmarks in detection_result.pose_landmarks:
+                    for landmark in pose_landmarks:
+                        x = int(landmark.x * frame.shape[1])
+                        y = int(landmark.y * frame.shape[0])
+                        cv2.circle(rgb_frame, (x, y), 5, (0, 255, 0), -1)
+
+            h, w, ch = rgb_frame.shape
+            bytes_per_line = ch * w
+            convert_to_Qt_format = QImage(
+                rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
+            )
+            p = convert_to_Qt_format.scaled(
+                800, 600, aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio
+            )
+            self.change_pixmap_signal.emit(p)
+
+        cap.release()
+        self.detector.close()
+
+    def stop(self):
+        self._run_flag = False
+        self.wait()
+
+
 class TechnicalAtelier(QMainWindow):
     def __init__(self):
+        import os
+        import urllib.request
+
+        model_path = "pose_landmarker_full.task"
+        if not os.path.exists(model_path):
+            url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
+            urllib.request.urlretrieve(url, model_path)
         super().__init__()
         self.setWindowTitle("Technical Atelier")
         self.setGeometry(100, 100, 1280, 720)
@@ -314,45 +397,16 @@ class TechnicalAtelier(QMainWindow):
         """)
         self.content_layout = QVBoxLayout(self.record_content)
 
-        # Corner Markers
-        # Top markers
-        top_markers = QHBoxLayout()
-        tl_marker = QLabel("┏")
-        tl_marker.setStyleSheet(
-            "color: #ffb4ab; font-size: 24px; border:none; background: transparent;"
-        )
-        tr_marker = QLabel("┓")
-        tr_marker.setStyleSheet(
-            "color: #ffb4ab; font-size: 24px; border:none; background: transparent;"
-        )
-        tr_marker.setAlignment(Qt.AlignmentFlag.AlignRight)
-        top_markers.addWidget(tl_marker)
-        top_markers.addWidget(tr_marker)
-        self.content_layout.addLayout(top_markers)
+        # We will add a QLabel to display the video feed
+        self.video_label = QLabel("CAMERA FEED")
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setStyleSheet("background-color: transparent; color: #acabaa;")
+        self.content_layout.addWidget(self.video_label, 1)  # Add with stretch factor 1
 
-        self.content_layout.addStretch()
-
-        # Center cursor locked label
-        cursor_label = QLabel("● CURSOR LOCKED")
-        cursor_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cursor_label.setStyleSheet("""
-            background-color: #1f2020;
-            color: #e7e5e5;
-            padding: 5px 10px;
-            border-radius: 4px;
-            font-size: 10px;
-            font-weight: bold;
-            border: none;
-        """)
-        cursor_label.setFixedSize(120, 25)
-
-        center_layout = QHBoxLayout()
-        center_layout.addStretch()
-        center_layout.addWidget(cursor_label)
-        center_layout.addStretch()
-        self.content_layout.addLayout(center_layout)
-
-        self.content_layout.addStretch()
+        # Setup Thread
+        self.thread = PoseCaptureThread()
+        self.thread.change_pixmap_signal.connect(self.update_image)
+        self.thread.start()
 
         # Floating Toolbar at bottom
         toolbar_container = QHBoxLayout()
@@ -449,25 +503,18 @@ class TechnicalAtelier(QMainWindow):
         toolbar_container.addStretch()
         self.content_layout.addLayout(toolbar_container)
 
-        # Bottom markers
-        bottom_markers = QHBoxLayout()
-        bl_marker = QLabel("┗")
-        bl_marker.setStyleSheet(
-            "color: #ffb4ab; font-size: 24px; border:none; background: transparent;"
-        )
-        br_marker = QLabel("┛")
-        br_marker.setStyleSheet(
-            "color: #ffb4ab; font-size: 24px; border:none; background: transparent;"
-        )
-        br_marker.setAlignment(Qt.AlignmentFlag.AlignRight)
-        bottom_markers.addWidget(bl_marker)
-        bottom_markers.addWidget(br_marker)
-        self.content_layout.addLayout(bottom_markers)
-
         self.record_layout.addWidget(self.record_content)
         self.central_area_layout.addWidget(self.record_frame)
 
         self.right_layout.addWidget(self.central_area)
+
+    def update_image(self, qt_image):
+        self.video_label.setPixmap(QPixmap.fromImage(qt_image))
+
+    def closeEvent(self, event):
+        if hasattr(self, "thread"):
+            self.thread.stop()
+        event.accept()
 
     def setup_footer(self):
         self.footer = QFrame()
