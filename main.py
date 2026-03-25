@@ -28,9 +28,9 @@ class GlobalHotkeyManager(QThread):
 
 
 class VisionCaptureThread(QThread):
-    # Signal that emits a list of mapped (x, y) coordinates for the 21 hand landmarks
-    # Emits an empty list if no hand is detected
-    sig_hand_data_updated = Signal(list)
+    # Signal that emits a list of mapped (x, y) coordinates for the 33 body landmarks
+    # Emits an empty list if no body is detected
+    sig_pose_data_updated = Signal(list)
 
     def __init__(self, screen_width, screen_height, camera_index=0):
         super().__init__()
@@ -39,19 +39,20 @@ class VisionCaptureThread(QThread):
         self.camera_index = camera_index
         self._is_running = True
 
-        # Initialize MediaPipe Hands
-        self.mp_hands = mp.solutions.hands
+        # Initialize MediaPipe Pose
+        self.mp_pose = mp.solutions.pose
 
     def run(self):
         cap = cv2.VideoCapture(self.camera_index)
 
         # Optimize performance: static_image_mode=False for video streams
-        with self.mp_hands.Hands(
+        with self.mp_pose.Pose(
             static_image_mode=False,
-            max_num_hands=1,
+            model_complexity=1,
+            enable_segmentation=False,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
-        ) as hands:
+        ) as pose:
             while self._is_running and cap.isOpened():
                 success, image = cap.read()
                 if not success:
@@ -65,22 +66,21 @@ class VisionCaptureThread(QThread):
                 # Flip the image horizontally for a later selfie-view display, and convert the BGR image to RGB.
                 image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB)
 
-                # Process the image and detect hands
-                results = hands.process(image)
+                # Process the image and detect pose
+                results = pose.process(image)
 
                 landmarks_pts = []
-                if results.multi_hand_landmarks:
-                    # We only process the first detected hand (since max_num_hands=1)
-                    hand_landmarks = results.multi_hand_landmarks[0]
-                    for landmark in hand_landmarks.landmark:
+                if results.pose_landmarks:
+                    # We process the detected full body pose
+                    for landmark in results.pose_landmarks.landmark:
                         # Convert normalized coordinates [0.0, 1.0] to screen coordinates
                         # We stretch the camera view directly to the screen dimensions
                         screen_x = landmark.x * self.screen_width
                         screen_y = landmark.y * self.screen_height
                         landmarks_pts.append(QPointF(screen_x, screen_y))
 
-                # Emit the extracted data (list of QPointF, or empty list if no hand)
-                self.sig_hand_data_updated.emit(landmarks_pts)
+                # Emit the extracted data (list of QPointF, or empty list if no pose)
+                self.sig_pose_data_updated.emit(landmarks_pts)
 
         # Release resources
         cap.release()
@@ -93,7 +93,7 @@ class VisionCaptureThread(QThread):
 class TransparentOverlay(QWidget):
     def __init__(self):
         super().__init__()
-        self.hand_landmarks = []  # List of QPointF representing the 21 joints
+        self.pose_landmarks = []  # List of QPointF representing the 33 body joints
         self.initUI()
 
     def initUI(self):
@@ -113,9 +113,9 @@ class TransparentOverlay(QWidget):
         geometry = screen.geometry()
         self.setGeometry(geometry)
 
-    def update_hand_data(self, landmarks: list):
-        """Slot to receive new hand data and trigger a repaint."""
-        self.hand_landmarks = landmarks
+    def update_pose_data(self, landmarks: list):
+        """Slot to receive new pose data and trigger a repaint."""
+        self.pose_landmarks = landmarks
         self.update()  # Schedule a paintEvent
 
     def toggle_visibility(self):
@@ -140,52 +140,38 @@ class TransparentOverlay(QWidget):
         painter.setPen(pen_border)
         painter.drawRect(5, 5, self.width() - 10, self.height() - 10)
 
-        # Draw hand skeleton if landmarks are available
-        if self.hand_landmarks and len(self.hand_landmarks) == 21:
-            # MediaPipe Hand Landmark Connections (Topology)
-            connections = [
-                (0, 1),
-                (1, 2),
-                (2, 3),
-                (3, 4),  # Thumb
-                (0, 5),
-                (5, 6),
-                (6, 7),
-                (7, 8),  # Index finger
-                (5, 9),
-                (9, 10),
-                (10, 11),
-                (11, 12),  # Middle finger
-                (9, 13),
-                (13, 14),
-                (14, 15),
-                (15, 16),  # Ring finger
-                (13, 17),
-                (0, 17),
-                (17, 18),
-                (18, 19),
-                (19, 20),  # Pinky
-            ]
+        # Draw body skeleton if landmarks are available
+        if self.pose_landmarks and len(self.pose_landmarks) == 33:
+            # MediaPipe Pose Landmark Connections (Topology)
+            connections = list(mp.solutions.pose.POSE_CONNECTIONS)
 
             # 1. Draw Bones (lines)
-            pen_bone = QPen(QColor(0, 255, 0, 180))
+            pen_bone = QPen(QColor(0, 255, 255, 180))  # Cyan bones
             pen_bone.setWidth(4)
             painter.setPen(pen_bone)
             for connection in connections:
-                pt1 = self.hand_landmarks[connection[0]]
-                pt2 = self.hand_landmarks[connection[1]]
+                pt1 = self.pose_landmarks[connection[0]]
+                pt2 = self.pose_landmarks[connection[1]]
                 painter.drawLine(pt1, pt2)
 
             # 2. Draw Joints (circles)
             painter.setBrush(QColor(255, 0, 0, 200))
             painter.setPen(Qt.PenStyle.NoPen)
-            for pt in self.hand_landmarks:
+            for pt in self.pose_landmarks:
                 painter.drawEllipse(pt, 6, 6)
 
-            # 3. Draw a larger circle at the index finger tip (landmark 8) for a "cursor" effect
-            index_tip = self.hand_landmarks[8]
-            painter.setBrush(QColor(0, 200, 255, 150))
-            painter.drawEllipse(index_tip, 15, 15)
+            # 3. Draw a larger circle at the nose (landmark 0) for the head
+            nose = self.pose_landmarks[0]
+            painter.setBrush(QColor(255, 255, 0, 150))  # Yellow head
+            painter.drawEllipse(nose, 20, 20)
+
+            # 4. Draw distinct circles for the hands (left: 15/19, right: 16/20)
+            # We use the index fingers (19 and 20) for hand tracking cursors
+            left_index = self.pose_landmarks[19]
+            right_index = self.pose_landmarks[20]
+            painter.setBrush(QColor(0, 200, 255, 150))  # Blue cursors
+            painter.drawEllipse(left_index, 15, 15)
+            painter.drawEllipse(right_index, 15, 15)
 
 
 if __name__ == "__main__":
@@ -199,11 +185,11 @@ if __name__ == "__main__":
     hotkey_thread.sig_exit_app.connect(overlay.exit_application)
     hotkey_thread.start()
 
-    # Setup Computer Vision Tracking (OpenCV + MediaPipe)
+    # Setup Computer Vision Tracking (OpenCV + MediaPipe Pose)
     vision_thread = VisionCaptureThread(
         overlay.width(), overlay.height(), camera_index=0
     )
-    vision_thread.sig_hand_data_updated.connect(overlay.update_hand_data)
+    vision_thread.sig_pose_data_updated.connect(overlay.update_pose_data)
     vision_thread.start()
 
     # Show the canvas
