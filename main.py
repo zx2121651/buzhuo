@@ -7,7 +7,7 @@ import keyboard
 import cv2
 import mediapipe as mp
 from PySide6.QtWidgets import QApplication, QWidget
-from PySide6.QtCore import Qt, QThread, Signal, QPointF
+from PySide6.QtCore import Qt, QThread, Signal, QPointF, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen
 
 # 导入配置和滤波器
@@ -207,7 +207,7 @@ class VisionCaptureThread(QThread):
                     for x_hat, y_hat, _ in ui_smoothed:
                         screen_x = x_hat * self.screen_width
                         screen_y = y_hat * self.screen_height
-                        landmarks_pts.append(QPointF(screen_x, screen_y))
+                        landmarks_pts.append(QPointF, QTimer(screen_x, screen_y))
 
                     # === 2. 处理用于下游引擎的 3D 物理世界坐标输出 ===
                     world_raw_points = []
@@ -238,7 +238,7 @@ class VisionCaptureThread(QThread):
                     self.ui_pose_filter.reset()
                     self.world_pose_filter.reset()
 
-                # Emit the extracted data (list of QPointF, or empty list if no pose)
+                # Emit the extracted data (list of QPointF, QTimer, or empty list if no pose)
                 self.sig_pose_data_updated.emit(landmarks_pts)
 
         # Release resources
@@ -252,8 +252,32 @@ class VisionCaptureThread(QThread):
 class TransparentOverlay(QWidget):
     def __init__(self):
         super().__init__()
-        self.pose_landmarks = []  # List of QPointF representing the 33 body joints
+        self.pose_landmarks = (
+            []
+        )  # List of QPointF, QTimer representing the 33 body joints
+
+        # 实时参数显示状态
+        self.current_config = APP_CONFIG.copy()
+        self.heartbeat_visible = False
+        self.heartbeat_timer = QTimer(self)
+        self.heartbeat_timer.timeout.connect(self._toggle_heartbeat)
+        self.heartbeat_timer.start(100)  # 每 100ms 闪烁一次
+
         self.initUI()
+
+    def _toggle_heartbeat(self):
+        self.heartbeat_visible = not self.heartbeat_visible
+        self.update()
+
+    def update_config_ui(self, new_config):
+        """当 ConfigWatcher 检测到配置更改时，更新 UI 面板"""
+        self.current_config = new_config.copy()
+        self.update()
+
+    def heartbeat(self):
+        """接收到 UDP 发送心跳"""
+        # 这里可以通过计数器或重置计时器来实现更精细的闪烁逻辑，目前用定时器自动闪烁代替
+        pass
 
     def initUI(self):
         # Window flags: Frameless, Always on Top, Click-through, Tool
@@ -299,6 +323,61 @@ class TransparentOverlay(QWidget):
         painter.setPen(pen_border)
         painter.drawRect(5, 5, self.width() - 10, self.height() - 10)
 
+        # --- Draw HUD Panel ---
+        # Draw semi-transparent background for HUD
+        painter.setBrush(QColor(0, 0, 0, 150))
+        painter.setPen(Qt.PenStyle.NoPen)
+        hud_rect = self.rect().adjusted(
+            20, 20, -self.width() + 320, -self.height() + 180
+        )
+        painter.drawRoundedRect(hud_rect, 10, 10)
+
+        # Draw text info
+        painter.setPen(QColor(255, 255, 255, 255))
+        font = painter.font()
+        font.setPointSize(10)
+        font.setBold(True)
+        painter.setFont(font)
+
+        # 绘制状态灯
+        if self.current_config.get("udp_enabled", True):
+            if self.heartbeat_visible:
+                painter.setBrush(QColor(0, 255, 0, 255))  # Green Blink
+            else:
+                painter.setBrush(QColor(0, 100, 0, 255))  # Dark Green
+            status_text = "UDP: 发送中"
+        else:
+            painter.setBrush(QColor(255, 0, 0, 255))  # Red Off
+            status_text = "UDP: 已停用"
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(30, 35, 12, 12)
+
+        painter.setPen(QColor(255, 255, 255, 255))
+        painter.drawText(50, 45, status_text)
+
+        # 绘制参数
+        y_offset = 70
+        painter.drawText(
+            30,
+            y_offset,
+            f"目标: {self.current_config.get('udp_ip')}:{self.current_config.get('udp_port')}",
+        )
+        y_offset += 25
+        painter.drawText(
+            30, y_offset, f"1€ min_cutoff: {self.current_config.get('min_cutoff')}"
+        )
+        y_offset += 25
+        painter.drawText(30, y_offset, f"1€ beta: {self.current_config.get('beta')}")
+        y_offset += 25
+
+        flip_x = self.current_config.get("flip_x", False)
+        flip_y = self.current_config.get("flip_y", False)
+        flip_z = self.current_config.get("flip_z", False)
+        painter.drawText(30, y_offset, f"翻转: X({flip_x}) Y({flip_y}) Z({flip_z})")
+
+        # --- End HUD Panel ---
+
         # Draw body skeleton if landmarks are available
         if self.pose_landmarks and len(self.pose_landmarks) == 33:
             # MediaPipe Pose Landmark Connections (Topology)
@@ -333,21 +412,26 @@ class TransparentOverlay(QWidget):
             painter.drawEllipse(right_index, 15, 15)
 
 
-class UdpSender:
+class UdpSender(QThread):
+    # 发射心跳信号，告诉 UI 成功发送了一帧数据
+    sig_heartbeat = Signal()
+
     def __init__(self, ip, port):
+        super().__init__()
         self.ip = ip
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # 设为非阻塞模式，防止网络波动卡死主线程
         self.sock.setblocking(False)
 
     def send(self, data_list):
         try:
-            # 使用紧凑型 JSON 格式序列化
-            msg = json.dumps(data_list, separators=(",", ":"))
+            # 包装为字典，方便 Unity 的 JsonUtility 反序列化 (不支持直接反序列化顶级数组)
+            payload = {"landmarks": data_list}
+            msg = json.dumps(payload, separators=(",", ":"))
             self.sock.sendto(msg.encode("utf-8"), (self.ip, self.port))
+            # 发射心跳
+            self.sig_heartbeat.emit()
         except BlockingIOError:
-            # 发送缓冲区满，直接丢弃该帧数据，不阻塞当前线程
             pass
         except Exception as e:
             print(f"[UDP] 发送错误: {e}")
@@ -394,9 +478,14 @@ if __name__ == "__main__":
     # 连接 3D 真实世界坐标数据流
     vision_thread.sig_3d_data_ready.connect(on_3d_data_ready)
 
+    # 接收发送心跳供 UI 刷新 (由于 UdpSender 改为 QThread，我们需要确保它是主线程可用的实例)
+    # 因为我们在 on_3d_data_ready 里调用全局的 udp_provider 实例，所以我们可以在主程序的初始化处链接心跳信号
+    udp_provider.sig_heartbeat.connect(overlay.heartbeat)
+
     # Setup Config Watcher (热重载配置文件)
     watcher_thread = ConfigWatcher()
     watcher_thread.sig_config_reloaded.connect(vision_thread.update_config)
+    watcher_thread.sig_config_reloaded.connect(overlay.update_config_ui)
     watcher_thread.start()
 
     vision_thread.start()
