@@ -73,26 +73,28 @@ class OneEuroFilter:
 class PoseFilterManager:
     """
     全身姿态滤波器管理器
-    用于同时管理 33 个关节点的 (X, Y) 坐标，共 66 个独立的一维滤波器。
+    用于同时管理 33 个关节点的 (X, Y, Z) 坐标，共 99 个独立的一维滤波器。
     """
 
     def __init__(self, num_points=33, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
         self.num_points = num_points
-        # 创建 X 轴的滤波器列表
+        # 创建 X, Y, Z 轴的滤波器列表
         self.filters_x = [
             OneEuroFilter(min_cutoff, beta, d_cutoff) for _ in range(num_points)
         ]
-        # 创建 Y 轴的滤波器列表
         self.filters_y = [
+            OneEuroFilter(min_cutoff, beta, d_cutoff) for _ in range(num_points)
+        ]
+        self.filters_z = [
             OneEuroFilter(min_cutoff, beta, d_cutoff) for _ in range(num_points)
         ]
 
     def process(self, points, t):
         """
         处理一帧关节点坐标列表
-        :param points: [(x0, y0), (x1, y1), ..., (x32, y32)] 列表
+        :param points: [(x0, y0, z0), (x1, y1, z1), ..., (x32, y32, z32)] 列表
         :param t: 当前系统时间戳 (秒)
-        :return: 平滑后的 [(x0_hat, y0_hat), ...] 列表
+        :return: 平滑后的 [(x0_hat, y0_hat, z0_hat), ...] 列表
         """
         # 如果输入的点数不是预期的，可能存在异常，不予处理
         if not points or len(points) != self.num_points:
@@ -100,17 +102,20 @@ class PoseFilterManager:
 
         smoothed_points = []
         # 遍历每一个点并应用相应的滤波器
-        for i, (x, y) in enumerate(points):
+        for i, (x, y, z) in enumerate(points):
             x_hat = self.filters_x[i](x, t)
             y_hat = self.filters_y[i](y, t)
-            smoothed_points.append((x_hat, y_hat))
+            z_hat = self.filters_z[i](z, t)
+            smoothed_points.append((x_hat, y_hat, z_hat))
         return smoothed_points
 
     def reset(self):
         """
-        清空所有 66 个滤波器的状态（例如在丢失目标追踪时调用）
+        清空所有 99 个滤波器的状态（例如在丢失目标追踪时调用）
         """
         for fx in self.filters_x:
             fx.reset()
         for fy in self.filters_y:
             fy.reset()
+        for fz in self.filters_z:
+            fz.reset()

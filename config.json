@@ -1,0 +1,7 @@
+{
+    "min_cutoff": 0.5,
+    "beta": 0.01,
+    "d_cutoff": 1.0,
+    "udp_enabled": false,
+    "udp_port": 5005
+}

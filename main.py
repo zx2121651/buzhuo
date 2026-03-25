@@ -7,16 +7,12 @@ from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtCore import Qt, QThread, Signal, QPointF
 from PySide6.QtGui import QPainter, QColor, QPen
 
-# 导入 1€ 滤波器
+# 导入配置和滤波器
+import config
 from one_euro_filter import PoseFilterManager
 
-# --- 全局平滑配置参数 ---
-# 您可以在这里微调 1€ Filter 的表现
-FILTER_CONFIG = {
-    "min_cutoff": 0.5,  # 控制低速时的平滑度 (值越小越平滑，但延迟增加)
-    "beta": 0.01,  # 控制高速时的响应速度 (值越大响应越快，但容易抖动)
-    "d_cutoff": 1.0,  # 速度平滑的截止频率 (一般保持 1.0 即可)
-}
+# 加载配置
+APP_CONFIG = config.load_config()
 
 
 class GlobalHotkeyManager(QThread):
@@ -43,6 +39,9 @@ class VisionCaptureThread(QThread):
     # Emits an empty list if no body is detected
     sig_pose_data_updated = Signal(list)
 
+    # 新增信号：发射用于下游 (如 3D 引擎) 的纯净 3D 数据列表
+    sig_3d_data_ready = Signal(list)
+
     def __init__(self, screen_width, screen_height, camera_index=0):
         super().__init__()
         self.screen_width = screen_width
@@ -51,11 +50,20 @@ class VisionCaptureThread(QThread):
         self._is_running = True
 
         # 初始化 1€ 全身姿态滤波器
-        self.pose_filter = PoseFilterManager(
+        # 用于 2D 屏幕渲染的滤波器 (X, Y 归一化坐标平滑，Z 直接透传补0)
+        self.ui_pose_filter = PoseFilterManager(
             num_points=33,
-            min_cutoff=FILTER_CONFIG["min_cutoff"],
-            beta=FILTER_CONFIG["beta"],
-            d_cutoff=FILTER_CONFIG["d_cutoff"],
+            min_cutoff=APP_CONFIG["min_cutoff"],
+            beta=APP_CONFIG["beta"],
+            d_cutoff=APP_CONFIG["d_cutoff"],
+        )
+
+        # 用于 3D 引擎输出的滤波器 (真实物理世界坐标平滑)
+        self.world_pose_filter = PoseFilterManager(
+            num_points=33,
+            min_cutoff=APP_CONFIG["min_cutoff"],
+            beta=APP_CONFIG["beta"],
+            d_cutoff=APP_CONFIG["d_cutoff"],
         )
 
         # Initialize MediaPipe Pose
@@ -88,29 +96,53 @@ class VisionCaptureThread(QThread):
                 # Process the image and detect pose
                 results = pose.process(image)
 
-                landmarks_pts = []
-                if results.pose_landmarks:
-                    # 当前时间戳 (用于 1€ Filter 计算速度)
+                landmarks_pts = []  # 用于 UI
+                world_data_list = []  # 用于 3D 引擎输出
+
+                if results.pose_landmarks and results.pose_world_landmarks:
                     current_t = time.time()
 
-                    raw_points = []
-                    # We process the detected full body pose
+                    # === 1. 处理用于 UI 渲染的 2D 坐标映射 ===
+                    ui_raw_points = []
                     for landmark in results.pose_landmarks.landmark:
-                        # Convert normalized coordinates [0.0, 1.0] to screen coordinates
-                        # We stretch the camera view directly to the screen dimensions
-                        screen_x = landmark.x * self.screen_width
-                        screen_y = landmark.y * self.screen_height
-                        raw_points.append((screen_x, screen_y))
+                        # 暂时补全 Z 轴为了适配 3D 滤波器，我们实际只关心 x, y 平滑
+                        ui_raw_points.append((landmark.x, landmark.y, 0.0))
 
-                    # 应用 1€ 滤波器进行平滑处理
-                    smoothed_points = self.pose_filter.process(raw_points, current_t)
+                    ui_smoothed = self.ui_pose_filter.process(ui_raw_points, current_t)
 
-                    # 将平滑后的坐标转换回 QPointF
-                    for x_hat, y_hat in smoothed_points:
-                        landmarks_pts.append(QPointF(x_hat, y_hat))
+                    for x_hat, y_hat, _ in ui_smoothed:
+                        screen_x = x_hat * self.screen_width
+                        screen_y = y_hat * self.screen_height
+                        landmarks_pts.append(QPointF(screen_x, screen_y))
+
+                    # === 2. 处理用于下游引擎的 3D 物理世界坐标输出 ===
+                    world_raw_points = []
+                    visibility_list = []
+                    for landmark in results.pose_world_landmarks.landmark:
+                        world_raw_points.append((landmark.x, landmark.y, landmark.z))
+                        visibility_list.append(landmark.visibility)
+
+                    world_smoothed = self.world_pose_filter.process(
+                        world_raw_points, current_t
+                    )
+
+                    # 组装最终输出的 List[Dict] 数据结构
+                    for i, (x_hat, y_hat, z_hat) in enumerate(world_smoothed):
+                        world_data_list.append(
+                            {
+                                "id": i,
+                                "x": x_hat,
+                                "y": y_hat,
+                                "z": z_hat,
+                                "visibility": visibility_list[i],
+                            }
+                        )
+
+                    self.sig_3d_data_ready.emit(world_data_list)
                 else:
-                    # 未检测到人体，必须重置滤波器的历史状态，避免重新捕捉时出现“瞬移拉扯”
-                    self.pose_filter.reset()
+                    # 丢失目标，重置滤波器
+                    self.ui_pose_filter.reset()
+                    self.world_pose_filter.reset()
 
                 # Emit the extracted data (list of QPointF, or empty list if no pose)
                 self.sig_pose_data_updated.emit(landmarks_pts)
@@ -207,6 +239,12 @@ class TransparentOverlay(QWidget):
             painter.drawEllipse(right_index, 15, 15)
 
 
+def on_3d_data_ready(data):
+    # 此处为测试打印，为了防止控制台被刷屏，我们仅在特定的帧（比如每10帧）或调试模式下输出
+    # print(json.dumps(data[:3], indent=2))  # 测试只打印前三个关节点 (通常是鼻子和眼睛)
+    pass
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
@@ -223,6 +261,10 @@ if __name__ == "__main__":
         overlay.width(), overlay.height(), camera_index=0
     )
     vision_thread.sig_pose_data_updated.connect(overlay.update_pose_data)
+
+    # 连接 3D 真实世界坐标数据流
+    vision_thread.sig_3d_data_ready.connect(on_3d_data_ready)
+
     vision_thread.start()
 
     # Show the canvas
