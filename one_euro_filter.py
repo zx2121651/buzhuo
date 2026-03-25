@@ -61,6 +61,14 @@ class OneEuroFilter:
     def _exponential_smoothing(self, a, x, x_prev):
         return a * x + (1 - a) * x_prev
 
+    def update_params(self, min_cutoff, beta, d_cutoff):
+        """
+        热更新滤波器参数
+        """
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+
     def reset(self):
         """
         重置滤波器的历史状态，用于目标丢失或重新追踪时
@@ -108,6 +116,15 @@ class PoseFilterManager:
             z_hat = self.filters_z[i](z, t)
             smoothed_points.append((x_hat, y_hat, z_hat))
         return smoothed_points
+
+    def update_params(self, min_cutoff, beta, d_cutoff):
+        """
+        热更新所有滤波器的参数
+        """
+        for fx, fy, fz in zip(self.filters_x, self.filters_y, self.filters_z):
+            fx.update_params(min_cutoff, beta, d_cutoff)
+            fy.update_params(min_cutoff, beta, d_cutoff)
+            fz.update_params(min_cutoff, beta, d_cutoff)
 
     def reset(self):
         """

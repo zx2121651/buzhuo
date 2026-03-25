@@ -1,5 +1,8 @@
 import sys
 import time
+import os
+import socket
+import json
 import keyboard
 import cv2
 import mediapipe as mp
@@ -15,10 +18,82 @@ from one_euro_filter import PoseFilterManager
 APP_CONFIG = config.load_config()
 
 
+class ConfigWatcher(QThread):
+    # 配置文件热重载监控器
+    sig_config_reloaded = Signal(dict)
+
+    def __init__(self, config_file="config.json", interval_ms=1000):
+        super().__init__()
+        self.config_file = config_file
+        self.interval_ms = interval_ms
+        self._is_running = True
+        self._last_mtime = 0
+        if os.path.exists(self.config_file):
+            self._last_mtime = os.path.getmtime(self.config_file)
+
+    def update_config(self, new_config: dict):
+        """接收到配置热重载信号后更新内部参数"""
+        global APP_CONFIG
+        APP_CONFIG = new_config
+        # 更新滤波器参数
+        min_c = new_config.get("min_cutoff", 0.5)
+        beta = new_config.get("beta", 0.01)
+        d_c = new_config.get("d_cutoff", 1.0)
+
+        self.ui_pose_filter.update_params(min_c, beta, d_c)
+        self.world_pose_filter.update_params(min_c, beta, d_c)
+        print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
+
+        # 实时更新 UDP 目标地址
+        if udp_provider:
+            ip = new_config.get("udp_ip", "127.0.0.1")
+            port = new_config.get("udp_port", 7001)
+            udp_provider.update_address(ip, port)
+
+    def run(self):
+        while self._is_running:
+            try:
+                if os.path.exists(self.config_file):
+                    current_mtime = os.path.getmtime(self.config_file)
+                    if current_mtime > self._last_mtime:
+                        self._last_mtime = current_mtime
+                        # 文件被修改，重新加载并发送信号
+                        new_config = config.load_config()
+                        self.sig_config_reloaded.emit(new_config)
+                        print("[Config] Reloaded configuration automatically.")
+            except Exception as e:
+                print(f"[Config] Error checking file: {e}")
+
+            time.sleep(self.interval_ms / 1000.0)
+
+    def stop(self):
+        self._is_running = False
+        self.wait()
+
+
 class GlobalHotkeyManager(QThread):
     # Signals to communicate with the main UI thread
     sig_toggle_visibility = Signal()
     sig_exit_app = Signal()
+
+    def update_config(self, new_config: dict):
+        """接收到配置热重载信号后更新内部参数"""
+        global APP_CONFIG
+        APP_CONFIG = new_config
+        # 更新滤波器参数
+        min_c = new_config.get("min_cutoff", 0.5)
+        beta = new_config.get("beta", 0.01)
+        d_c = new_config.get("d_cutoff", 1.0)
+
+        self.ui_pose_filter.update_params(min_c, beta, d_c)
+        self.world_pose_filter.update_params(min_c, beta, d_c)
+        print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
+
+        # 实时更新 UDP 目标地址
+        if udp_provider:
+            ip = new_config.get("udp_ip", "127.0.0.1")
+            port = new_config.get("udp_port", 7001)
+            udp_provider.update_address(ip, port)
 
     def run(self):
         # Register global hotkeys
@@ -68,6 +143,25 @@ class VisionCaptureThread(QThread):
 
         # Initialize MediaPipe Pose
         self.mp_pose = mp.solutions.pose
+
+    def update_config(self, new_config: dict):
+        """接收到配置热重载信号后更新内部参数"""
+        global APP_CONFIG
+        APP_CONFIG = new_config
+        # 更新滤波器参数
+        min_c = new_config.get("min_cutoff", 0.5)
+        beta = new_config.get("beta", 0.01)
+        d_c = new_config.get("d_cutoff", 1.0)
+
+        self.ui_pose_filter.update_params(min_c, beta, d_c)
+        self.world_pose_filter.update_params(min_c, beta, d_c)
+        print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
+
+        # 实时更新 UDP 目标地址
+        if udp_provider:
+            ip = new_config.get("udp_ip", "127.0.0.1")
+            port = new_config.get("udp_port", 7001)
+            udp_provider.update_address(ip, port)
 
     def run(self):
         cap = cv2.VideoCapture(self.camera_index)
@@ -239,7 +333,42 @@ class TransparentOverlay(QWidget):
             painter.drawEllipse(right_index, 15, 15)
 
 
+class UdpSender:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # 设为非阻塞模式，防止网络波动卡死主线程
+        self.sock.setblocking(False)
+
+    def send(self, data_list):
+        try:
+            # 使用紧凑型 JSON 格式序列化
+            msg = json.dumps(data_list, separators=(",", ":"))
+            self.sock.sendto(msg.encode("utf-8"), (self.ip, self.port))
+        except BlockingIOError:
+            # 发送缓冲区满，直接丢弃该帧数据，不阻塞当前线程
+            pass
+        except Exception as e:
+            print(f"[UDP] 发送错误: {e}")
+
+    def update_address(self, ip, port):
+        self.ip = ip
+        self.port = port
+
+    def close(self):
+        self.sock.close()
+
+
+# 全局 UDP 实例
+udp_provider = UdpSender(
+    APP_CONFIG.get("udp_ip", "127.0.0.1"), APP_CONFIG.get("udp_port", 7001)
+)
+
+
 def on_3d_data_ready(data):
+    if APP_CONFIG.get("udp_enabled", True):
+        udp_provider.send(data)
     # 此处为测试打印，为了防止控制台被刷屏，我们仅在特定的帧（比如每10帧）或调试模式下输出
     # print(json.dumps(data[:3], indent=2))  # 测试只打印前三个关节点 (通常是鼻子和眼睛)
     pass
@@ -265,6 +394,11 @@ if __name__ == "__main__":
     # 连接 3D 真实世界坐标数据流
     vision_thread.sig_3d_data_ready.connect(on_3d_data_ready)
 
+    # Setup Config Watcher (热重载配置文件)
+    watcher_thread = ConfigWatcher()
+    watcher_thread.sig_config_reloaded.connect(vision_thread.update_config)
+    watcher_thread.start()
+
     vision_thread.start()
 
     # Show the canvas
@@ -274,7 +408,11 @@ if __name__ == "__main__":
     exit_code = app.exec()
 
     # Clean up threads
+    watcher_thread.stop()
     vision_thread.stop()
     hotkey_thread.stop()
+
+    if udp_provider:
+        udp_provider.close()
 
     sys.exit(exit_code)
