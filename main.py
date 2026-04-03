@@ -35,213 +35,158 @@ class ConfigWatcher(QThread):
         """接收到配置热重载信号后更新内部参数"""
         global APP_CONFIG
         APP_CONFIG = new_config
-        # 更新滤波器参数
         min_c = new_config.get("min_cutoff", 0.5)
         beta = new_config.get("beta", 0.01)
         d_c = new_config.get("d_cutoff", 1.0)
 
-        self.ui_pose_filter.update_params(min_c, beta, d_c)
-        self.world_pose_filter.update_params(min_c, beta, d_c)
-        print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
+        for f in [
+            self.ui_pose_filter,
+            self.ui_face_filter,
+            self.ui_lh_filter,
+            self.ui_rh_filter,
+            self.world_pose_filter,
+            self.world_face_filter,
+            self.world_lh_filter,
+            self.world_rh_filter,
+        ]:
+            f.update_params(min_c, beta, d_c)
 
-        # 实时更新 UDP 目标地址
-        if udp_provider:
-            ip = new_config.get("udp_ip", "127.0.0.1")
-            port = new_config.get("udp_port", 7001)
-            udp_provider.update_address(ip, port)
-
-    def run(self):
-        while self._is_running:
-            try:
-                if os.path.exists(self.config_file):
-                    current_mtime = os.path.getmtime(self.config_file)
-                    if current_mtime > self._last_mtime:
-                        self._last_mtime = current_mtime
-                        # 文件被修改，重新加载并发送信号
-                        new_config = config.load_config()
-                        self.sig_config_reloaded.emit(new_config)
-                        print("[Config] Reloaded configuration automatically.")
-            except Exception as e:
-                print(f"[Config] Error checking file: {e}")
-
-            time.sleep(self.interval_ms / 1000.0)
-
-    def stop(self):
-        self._is_running = False
-        self.wait()
-
-
-class GlobalHotkeyManager(QThread):
-    # Signals to communicate with the main UI thread
-    sig_toggle_visibility = Signal()
-    sig_exit_app = Signal()
-
-    def update_config(self, new_config: dict):
-        """接收到配置热重载信号后更新内部参数"""
-        global APP_CONFIG
-        APP_CONFIG = new_config
-        # 更新滤波器参数
-        min_c = new_config.get("min_cutoff", 0.5)
-        beta = new_config.get("beta", 0.01)
-        d_c = new_config.get("d_cutoff", 1.0)
-
-        self.ui_pose_filter.update_params(min_c, beta, d_c)
-        self.world_pose_filter.update_params(min_c, beta, d_c)
-        print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
-
-        # 实时更新 UDP 目标地址
-        if udp_provider:
-            ip = new_config.get("udp_ip", "127.0.0.1")
-            port = new_config.get("udp_port", 7001)
-            udp_provider.update_address(ip, port)
-
-    def run(self):
-        # Register global hotkeys
-        # We run this in a separate thread so it doesn't block the UI
-        keyboard.add_hotkey("insert", self.sig_toggle_visibility.emit)
-        keyboard.add_hotkey("end", self.sig_exit_app.emit)
-
-        # Keep the thread alive
-        keyboard.wait()
-
-    def stop(self):
-        keyboard.unhook_all()
-        self.terminate()
-
-
-class VisionCaptureThread(QThread):
-    # Signal that emits a list of mapped (x, y) coordinates for the 33 body landmarks
-    # Emits an empty list if no body is detected
-    sig_pose_data_updated = Signal(list)
-
-    # 新增信号：发射用于下游 (如 3D 引擎) 的纯净 3D 数据列表
-    sig_3d_data_ready = Signal(list)
-
-    def __init__(self, screen_width, screen_height, camera_index=0):
-        super().__init__()
-        self.screen_width = screen_width
-        self.screen_height = screen_height
-        self.camera_index = camera_index
-        self._is_running = True
-
-        # 初始化 1€ 全身姿态滤波器
-        # 用于 2D 屏幕渲染的滤波器 (X, Y 归一化坐标平滑，Z 直接透传补0)
-        self.ui_pose_filter = PoseFilterManager(
-            num_points=33,
-            min_cutoff=APP_CONFIG["min_cutoff"],
-            beta=APP_CONFIG["beta"],
-            d_cutoff=APP_CONFIG["d_cutoff"],
+        print(
+            f"[Vision] Holistic Filter params updated: min_cutoff={min_c}, beta={beta}"
         )
 
-        # 用于 3D 引擎输出的滤波器 (真实物理世界坐标平滑)
-        self.world_pose_filter = PoseFilterManager(
-            num_points=33,
-            min_cutoff=APP_CONFIG["min_cutoff"],
-            beta=APP_CONFIG["beta"],
-            d_cutoff=APP_CONFIG["d_cutoff"],
-        )
-
-        # Initialize MediaPipe Pose
-        self.mp_pose = mp.solutions.pose
-
-    def update_config(self, new_config: dict):
-        """接收到配置热重载信号后更新内部参数"""
-        global APP_CONFIG
-        APP_CONFIG = new_config
-        # 更新滤波器参数
-        min_c = new_config.get("min_cutoff", 0.5)
-        beta = new_config.get("beta", 0.01)
-        d_c = new_config.get("d_cutoff", 1.0)
-
-        self.ui_pose_filter.update_params(min_c, beta, d_c)
-        self.world_pose_filter.update_params(min_c, beta, d_c)
-        print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
-
-        # 实时更新 UDP 目标地址
         if udp_provider:
             ip = new_config.get("udp_ip", "127.0.0.1")
             port = new_config.get("udp_port", 7001)
             udp_provider.update_address(ip, port)
 
+    def _process_landmarks(self, landmarks, filter_manager, is_world=False):
+        import time
+
+        if not landmarks:
+            return []
+        current_t = time.time()
+        raw_points = []
+        visibility_list = []
+
+        for lm in landmarks.landmark:
+            if is_world:
+                raw_points.append((lm.x, lm.y, lm.z))
+                visibility_list.append(getattr(lm, "visibility", 1.0))
+            else:
+                raw_points.append((lm.x, lm.y, getattr(lm, "z", 0.0)))
+
+        smoothed = filter_manager.process(raw_points, current_t)
+
+        if is_world:
+            flip_x = APP_CONFIG.get("flip_x", False)
+            flip_y = APP_CONFIG.get("flip_y", False)
+            flip_z = APP_CONFIG.get("flip_z", False)
+            res = []
+            for i, (x_hat, y_hat, z_hat) in enumerate(smoothed):
+                res.append(
+                    {
+                        "id": i,
+                        "x": -x_hat if flip_x else x_hat,
+                        "y": -y_hat if flip_y else y_hat,
+                        "z": -z_hat if flip_z else z_hat,
+                        "visibility": visibility_list[i],
+                    }
+                )
+            return res
+        else:
+            res = []
+            for x_hat, y_hat, _ in smoothed:
+                res.append(
+                    QPointF(x_hat * self.screen_width, y_hat * self.screen_height)
+                )
+            return res
+
     def run(self):
+        import time
+
         cap = cv2.VideoCapture(self.camera_index)
 
-        # Optimize performance: static_image_mode=False for video streams
-        with self.mp_pose.Pose(
+        with self.mp_holistic.Holistic(
             static_image_mode=False,
             model_complexity=1,
+            smooth_landmarks=False,
             enable_segmentation=False,
+            refine_face_landmarks=True,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
-        ) as pose:
+        ) as holistic:
             while self._is_running and cap.isOpened():
                 success, image = cap.read()
                 if not success:
-                    # If reading frame fails, sleep briefly and try again
                     time.sleep(0.01)
                     continue
 
-                # To improve performance, optionally mark the image as not writeable to pass by reference.
                 image.flags.writeable = False
-
-                # Flip the image horizontally for a later selfie-view display, and convert the BGR image to RGB.
                 image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB)
 
-                # Process the image and detect pose
-                results = pose.process(image)
+                results = holistic.process(image)
 
-                landmarks_pts = []  # 用于 UI
-                world_data_list = []  # 用于 3D 引擎输出
+                ui_data = {"pose": [], "face": [], "left_hand": [], "right_hand": []}
+                world_data = {"pose": [], "face": [], "left_hand": [], "right_hand": []}
+                has_data = False
 
-                if results.pose_landmarks and results.pose_world_landmarks:
-                    current_t = time.time()
-
-                    # === 1. 处理用于 UI 渲染的 2D 坐标映射 ===
-                    ui_raw_points = []
-                    for landmark in results.pose_landmarks.landmark:
-                        # 暂时补全 Z 轴为了适配 3D 滤波器，我们实际只关心 x, y 平滑
-                        ui_raw_points.append((landmark.x, landmark.y, 0.0))
-
-                    ui_smoothed = self.ui_pose_filter.process(ui_raw_points, current_t)
-
-                    for x_hat, y_hat, _ in ui_smoothed:
-                        screen_x = x_hat * self.screen_width
-                        screen_y = y_hat * self.screen_height
-                        landmarks_pts.append(QPointF, QTimer(screen_x, screen_y))
-
-                    # === 2. 处理用于下游引擎的 3D 物理世界坐标输出 ===
-                    world_raw_points = []
-                    visibility_list = []
-                    for landmark in results.pose_world_landmarks.landmark:
-                        world_raw_points.append((landmark.x, landmark.y, landmark.z))
-                        visibility_list.append(landmark.visibility)
-
-                    world_smoothed = self.world_pose_filter.process(
-                        world_raw_points, current_t
+                if results.pose_landmarks:
+                    has_data = True
+                    ui_data["pose"] = self._process_landmarks(
+                        results.pose_landmarks, self.ui_pose_filter, is_world=False
                     )
-
-                    # 组装最终输出的 List[Dict] 数据结构
-                    for i, (x_hat, y_hat, z_hat) in enumerate(world_smoothed):
-                        world_data_list.append(
-                            {
-                                "id": i,
-                                "x": x_hat,
-                                "y": y_hat,
-                                "z": z_hat,
-                                "visibility": visibility_list[i],
-                            }
+                    if results.pose_world_landmarks:
+                        world_data["pose"] = self._process_landmarks(
+                            results.pose_world_landmarks,
+                            self.world_pose_filter,
+                            is_world=True,
                         )
-
-                    self.sig_3d_data_ready.emit(world_data_list)
                 else:
-                    # 丢失目标，重置滤波器
                     self.ui_pose_filter.reset()
                     self.world_pose_filter.reset()
 
-                # Emit the extracted data (list of QPointF, QTimer, or empty list if no pose)
-                self.sig_pose_data_updated.emit(landmarks_pts)
+                if results.face_landmarks:
+                    ui_data["face"] = self._process_landmarks(
+                        results.face_landmarks, self.ui_face_filter, is_world=False
+                    )
+                    world_data["face"] = self._process_landmarks(
+                        results.face_landmarks, self.world_face_filter, is_world=True
+                    )
+                else:
+                    self.ui_face_filter.reset()
+                    self.world_face_filter.reset()
 
-        # Release resources
+                if results.left_hand_landmarks:
+                    ui_data["left_hand"] = self._process_landmarks(
+                        results.left_hand_landmarks, self.ui_lh_filter, is_world=False
+                    )
+                    world_data["left_hand"] = self._process_landmarks(
+                        results.left_hand_landmarks, self.world_lh_filter, is_world=True
+                    )
+                else:
+                    self.ui_lh_filter.reset()
+                    self.world_lh_filter.reset()
+
+                if results.right_hand_landmarks:
+                    ui_data["right_hand"] = self._process_landmarks(
+                        results.right_hand_landmarks, self.ui_rh_filter, is_world=False
+                    )
+                    world_data["right_hand"] = self._process_landmarks(
+                        results.right_hand_landmarks,
+                        self.world_rh_filter,
+                        is_world=True,
+                    )
+                else:
+                    self.ui_rh_filter.reset()
+                    self.world_rh_filter.reset()
+
+                if has_data:
+                    self.sig_pose_data_updated.emit(ui_data)
+                    self.sig_3d_data_ready.emit(world_data)
+                else:
+                    self.sig_pose_data_updated.emit({})
+
         cap.release()
 
     def stop(self):
@@ -252,9 +197,7 @@ class VisionCaptureThread(QThread):
 class TransparentOverlay(QWidget):
     def __init__(self):
         super().__init__()
-        self.pose_landmarks = (
-            []
-        )  # List of QPointF, QTimer representing the 33 body joints
+        self.pose_data = {}  # 保存最新接收到的 Holistic 字典
 
         # 实时参数显示状态
         self.current_config = APP_CONFIG.copy()
@@ -296,9 +239,9 @@ class TransparentOverlay(QWidget):
         geometry = screen.geometry()
         self.setGeometry(geometry)
 
-    def update_pose_data(self, landmarks: list):
+    def update_pose_data(self, data_dict: dict):
         """Slot to receive new pose data and trigger a repaint."""
-        self.pose_landmarks = landmarks
+        self.pose_data = data_dict
         self.update()  # Schedule a paintEvent
 
     def toggle_visibility(self):
@@ -378,38 +321,51 @@ class TransparentOverlay(QWidget):
 
         # --- End HUD Panel ---
 
-        # Draw body skeleton if landmarks are available
-        if self.pose_landmarks and len(self.pose_landmarks) == 33:
-            # MediaPipe Pose Landmark Connections (Topology)
-            connections = list(mp.solutions.pose.POSE_CONNECTIONS)
+        # --- Draw Holistic Skeleton ---
+        if not self.pose_data:
+            return
 
-            # 1. Draw Bones (lines)
-            pen_bone = QPen(QColor(0, 255, 255, 180))  # Cyan bones
+        face_pts = self.pose_data.get("face", [])
+        if face_pts:
+            painter.setPen(QColor(255, 255, 255, 80))
+            for pt in face_pts:
+                painter.drawPoint(pt)
+
+        pose_pts = self.pose_data.get("pose", [])
+        if pose_pts and len(pose_pts) == 33:
+            pen_bone = QPen(QColor(0, 255, 255, 180))
             pen_bone.setWidth(4)
             painter.setPen(pen_bone)
-            for connection in connections:
-                pt1 = self.pose_landmarks[connection[0]]
-                pt2 = self.pose_landmarks[connection[1]]
+            for connection in mp.solutions.holistic.POSE_CONNECTIONS:
+                pt1 = pose_pts[connection[0]]
+                pt2 = pose_pts[connection[1]]
                 painter.drawLine(pt1, pt2)
 
-            # 2. Draw Joints (circles)
             painter.setBrush(QColor(255, 0, 0, 200))
             painter.setPen(Qt.PenStyle.NoPen)
-            for pt in self.pose_landmarks:
+            for pt in pose_pts:
                 painter.drawEllipse(pt, 6, 6)
 
-            # 3. Draw a larger circle at the nose (landmark 0) for the head
-            nose = self.pose_landmarks[0]
-            painter.setBrush(QColor(255, 255, 0, 150))  # Yellow head
-            painter.drawEllipse(nose, 20, 20)
+            painter.setBrush(QColor(255, 255, 0, 150))
+            painter.drawEllipse(pose_pts[0], 20, 20)
 
-            # 4. Draw distinct circles for the hands (left: 15/19, right: 16/20)
-            # We use the index fingers (19 and 20) for hand tracking cursors
-            left_index = self.pose_landmarks[19]
-            right_index = self.pose_landmarks[20]
-            painter.setBrush(QColor(0, 200, 255, 150))  # Blue cursors
-            painter.drawEllipse(left_index, 15, 15)
-            painter.drawEllipse(right_index, 15, 15)
+        def draw_hand(hand_pts, hand_color):
+            if not hand_pts or len(hand_pts) != 21:
+                return
+            pen_hand = QPen(hand_color)
+            pen_hand.setWidth(3)
+            painter.setPen(pen_hand)
+            for connection in mp.solutions.holistic.HAND_CONNECTIONS:
+                pt1 = hand_pts[connection[0]]
+                pt2 = hand_pts[connection[1]]
+                painter.drawLine(pt1, pt2)
+            painter.setBrush(hand_color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            for pt in hand_pts:
+                painter.drawEllipse(pt, 4, 4)
+
+        draw_hand(self.pose_data.get("left_hand", []), QColor(0, 255, 0, 200))
+        draw_hand(self.pose_data.get("right_hand", []), QColor(255, 165, 0, 200))
 
 
 class UdpSender(QThread):
