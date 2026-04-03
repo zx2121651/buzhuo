@@ -20,7 +20,11 @@ public class Landmark
 [Serializable]
 public class LandmarkWrapper
 {
-    public List<Landmark> landmarks;
+    // 对齐 Python 端的新 Holistic 字典格式
+    public List<Landmark> pose;
+    public List<Landmark> face;
+    public List<Landmark> left_hand;
+    public List<Landmark> right_hand;
 }
 
 public class UDPReceiver : MonoBehaviour
@@ -109,15 +113,19 @@ public class UDPReceiver : MonoBehaviour
                 try
                 {
                     LandmarkWrapper wrapper = JsonUtility.FromJson<LandmarkWrapper>(text);
-                    if (wrapper != null && wrapper.landmarks != null && wrapper.landmarks.Count == 33)
+                    if (wrapper != null && wrapper.pose != null && wrapper.pose.Count == 33)
                     {
                         lock (dataLock)
                         {
                             for (int i = 0; i < 33; i++)
                             {
-                                currentLandmarks[i] = wrapper.landmarks[i];
+                                currentLandmarks[i] = wrapper.pose[i];
                             }
                             hasNewData = true;
+
+                            // 此时我们成功反序列化了脸部和手部的数据
+                            // int faceNodes = wrapper.face != null ? wrapper.face.Count : 0;
+                            // Debug.Log($"[Mocap] Received Pose:33 Face:{faceNodes}");
                         }
                     }
                 }
