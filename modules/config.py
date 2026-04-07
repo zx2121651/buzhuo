@@ -14,9 +14,13 @@ DEFAULT_CONFIG = {
     "udp_enabled": True,  # 是否发送 UDP 数据
     "udp_ip": "127.0.0.1",  # UDP 目标 IP
     "udp_port": 7001,  # UDP 目标端口
-    "flip_x": False,  # 坐标系 X 翻转 (针对不同 3D 引擎)
+    "flip_x": False,  # 坐标系 X 翻转
     "flip_y": False,  # 坐标系 Y 翻转
     "flip_z": False,  # 坐标系 Z 翻转
+    # --- 高阶算法增强 (Algorithm Enhancements) ---
+    "enable_global_depth": True,  # 开启绝对空间位移 (Global Root Depth Estimation)
+    "ref_shoulder_width_m": 0.40,  # 物理标准肩宽参考值 (米)
+    "camera_focal_length_px": 800.0,  # 摄像机等效焦距 (像素)，影响推算的深度敏感度
 }
 
 

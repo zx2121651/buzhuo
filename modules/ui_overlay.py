@@ -128,6 +128,19 @@ class TransparentOverlay(QWidget):
         flip_y = self.current_config.get("flip_y", False)
         flip_z = self.current_config.get("flip_z", False)
         painter.drawText(30, y_offset, f"翻转: X({flip_x}) Y({flip_y}) Z({flip_z})")
+
+        y_offset += 25
+        enable_depth = self.current_config.get("enable_global_depth", True)
+        if enable_depth:
+            ref_w = self.current_config.get("ref_shoulder_width_m", 0.40)
+            focal = self.current_config.get("camera_focal_length_px", 800)
+            painter.drawText(
+                30, y_offset, f"绝对深度(Global Z): 开启 [Ref:{ref_w}m, Focal:{focal}]"
+            )
+        else:
+            painter.setPen(QColor(255, 100, 100))
+            painter.drawText(30, y_offset, f"绝对深度(Global Z): 关闭 (原地踏步)")
+            painter.setPen(QColor(255, 255, 255))
         # --- End HUD Panel ---
 
         if not self.pose_data:
