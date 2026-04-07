@@ -1,9 +1,24 @@
 import cv2
 import time
 import os
+import math
+import numpy as np
 import mediapipe as mp
 from PySide6.QtCore import QThread, Signal, QPointF
 from one_euro_filter import PoseFilterManager
+
+# 标准人脸的 3D 参考坐标 (单位: 毫米)
+FACE_3D_MODEL_POINTS = np.array(
+    [
+        (0.0, 0.0, 0.0),  # Nose tip
+        (0.0, -330.0, -65.0),  # Chin
+        (-225.0, 170.0, -135.0),  # Left eye left corner
+        (225.0, 170.0, -135.0),  # Right eye right corner
+        (-150.0, -150.0, -125.0),  # Left Mouth corner
+        (150.0, -150.0, -125.0),  # Right mouth corner
+    ],
+    dtype=np.float64,
+)
 
 
 class VisionCaptureThread(QThread):
@@ -42,6 +57,7 @@ class VisionCaptureThread(QThread):
         self.world_rh_filter = PoseFilterManager(21, min_c, beta, d_c)
 
         self.global_root_filter = PoseFilterManager(1, min_c, beta, d_c)
+        self.head_pose_filter = PoseFilterManager(1, min_c, beta, d_c)
 
     def update_config(self, new_config: dict):
         self.current_config = new_config.copy()
@@ -62,6 +78,87 @@ class VisionCaptureThread(QThread):
         ]:
             f.update_params(min_c, beta, d_c)
         print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
+
+    def _solve_head_pnp(self, face_landmarks):
+        if not self.current_config.get("enable_head_pnp", True):
+            return 0.0, 0.0, 0.0
+
+        img_w, img_h = self.screen_width, self.screen_height
+
+        image_points = np.array(
+            [
+                (
+                    face_landmarks.landmark[1].x * img_w,
+                    face_landmarks.landmark[1].y * img_h,
+                ),
+                (
+                    face_landmarks.landmark[152].x * img_w,
+                    face_landmarks.landmark[152].y * img_h,
+                ),
+                (
+                    face_landmarks.landmark[33].x * img_w,
+                    face_landmarks.landmark[33].y * img_h,
+                ),
+                (
+                    face_landmarks.landmark[263].x * img_w,
+                    face_landmarks.landmark[263].y * img_h,
+                ),
+                (
+                    face_landmarks.landmark[61].x * img_w,
+                    face_landmarks.landmark[61].y * img_h,
+                ),
+                (
+                    face_landmarks.landmark[291].x * img_w,
+                    face_landmarks.landmark[291].y * img_h,
+                ),
+            ],
+            dtype=np.float64,
+        )
+
+        focal_length = self.screen_width
+        center = (self.screen_width / 2, self.screen_height / 2)
+        camera_matrix = np.array(
+            [[focal_length, 0, center[0]], [0, focal_length, center[1]], [0, 0, 1]],
+            dtype=np.float64,
+        )
+
+        dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+
+        success, rvec, tvec = cv2.solvePnP(
+            FACE_3D_MODEL_POINTS,
+            image_points,
+            camera_matrix,
+            dist_coeffs,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+
+        if not success:
+            return 0.0, 0.0, 0.0
+
+        rmat, _ = cv2.Rodrigues(rvec)
+
+        sy = math.sqrt(rmat[0, 0] * rmat[0, 0] + rmat[1, 0] * rmat[1, 0])
+        singular = sy < 1e-6
+
+        if not singular:
+            x = math.atan2(rmat[2, 1], rmat[2, 2])
+            y = math.atan2(-rmat[2, 0], sy)
+            z = math.atan2(rmat[1, 0], rmat[0, 0])
+        else:
+            x = math.atan2(-rmat[1, 2], rmat[1, 1])
+            y = math.atan2(-rmat[2, 0], sy)
+            z = 0
+
+        pitch = math.degrees(x)
+        yaw = math.degrees(y)
+        roll = math.degrees(z)
+
+        smoothed_head = self.head_pose_filter.process([(pitch, yaw, roll)], time.time())
+        if not smoothed_head:
+            return pitch, yaw, roll
+
+        s_p, s_y, s_r = smoothed_head[0]
+        return s_p, s_y, s_r
 
     def _estimate_global_root(self, pose_landmarks):
         if not self.current_config.get("enable_global_depth", True):

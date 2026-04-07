@@ -18,9 +18,10 @@ DEFAULT_CONFIG = {
     "flip_y": False,  # 坐标系 Y 翻转
     "flip_z": False,  # 坐标系 Z 翻转
     # --- 高阶算法增强 (Algorithm Enhancements) ---
-    "enable_global_depth": True,  # 开启绝对空间位移 (Global Root Depth Estimation)
+    "enable_global_depth": True,  # 开启绝对空间位移推算
     "ref_shoulder_width_m": 0.40,  # 物理标准肩宽参考值 (米)
-    "camera_focal_length_px": 800.0,  # 摄像机等效焦距 (像素)，影响推算的深度敏感度
+    "camera_focal_length_px": 800.0,  # 摄像机等效焦距 (像素)
+    "enable_head_pnp": True,  # 开启高精度头部姿态解算 (PnP)
 }
 
 

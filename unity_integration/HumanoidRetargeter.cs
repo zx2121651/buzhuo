@@ -86,16 +86,22 @@ public class HumanoidRetargeter : MonoBehaviour
 
     void LateUpdate()
     {
-        // 从 UDPReceiver 获取最新的 33 个关节点坐标
-        // 注意：这里需要我们在 UDPReceiver 中暴露一个公开方法或属性来获取 currentLandmarks
-        // 为了解耦，假设 receiver.GetCurrentLandmarks() 返回一个 Vector3[33] 的数组
-        Vector3[] mpPoints = receiver.GetCurrentLandmarks();
-        if (mpPoints == null || mpPoints.Length != 33) return;
+        // 1. 获取基础关节点坐标
+        Landmark[] landmarks = receiver.GetCurrentLandmarks();
+        if (landmarks == null || landmarks.Length != 33) return;
+
+        // 提取 33 个 Vector3
+        Vector3[] mpPoints = new Vector3[33];
+        for(int i=0; i<33; i++) {
+            if(landmarks[i] != null) {
+                mpPoints[i] = new Vector3(landmarks[i].x, landmarks[i].y, landmarks[i].z);
+            }
+        }
 
         // 第一次收到数据时，进行捕捉空间的根节点校准
         if (!isCalibrated)
         {
-            initMpRootPosition = (mpPoints[23] + mpPoints[24]) / 2f; // 左右髋部中点作为捕捉根节点
+            initMpRootPosition = (mpPoints[23] + mpPoints[24]) / 2f;
             isCalibrated = true;
             Debug.Log("[Mocap] T-Pose Calibrated.");
         }
@@ -105,24 +111,39 @@ public class HumanoidRetargeter : MonoBehaviour
         {
             Vector3 currentMpRoot = (mpPoints[23] + mpPoints[24]) / 2f;
             Vector3 relativeMovement = (currentMpRoot - initMpRootPosition) * rootScale;
-
-            // 将相对位移叠加到模型初始的骨盆位置上
             boneTransforms[HumanBodyBones.Hips].position = initHipsPosition + relativeMovement;
         }
 
         // 2. 躯干 (Torso)
-        // 脊柱：由髋部中点指向肩部中点
         Vector3 mpMidHip = (mpPoints[23] + mpPoints[24]) / 2f;
         Vector3 mpMidShoulder = (mpPoints[11] + mpPoints[12]) / 2f;
-        // 使用双肩作为 up 向量构建平面
         Vector3 spineForward = Vector3.Cross(mpMidShoulder - mpMidHip, mpPoints[12] - mpPoints[11]).normalized;
         ApplyRotation(HumanBodyBones.Spine, mpMidHip, mpMidShoulder, spineForward);
 
-        // 头颈 (Head/Neck)
-        Vector3 mpNose = mpPoints[0];
-        ApplyRotation(HumanBodyBones.Neck, mpMidShoulder, mpNose, spineForward);
+        // 3. 高精度头颈 (Head/Neck PnP)
+        HeadPose pnpPose = receiver.GetCurrentHeadPose();
+        if (pnpPose != null && (Mathf.Abs(pnpPose.pitch) > 0.01f || Mathf.Abs(pnpPose.yaw) > 0.01f))
+        {
+            // 如果 Python 端启用了 PnP 解算，则使用高精度的欧拉角覆盖原本粗糙的 LookRotation
+            // OpenCV: X向右(Pitch), Y向下(Yaw), Z向前(Roll)
+            // Unity (通常): X向右(Pitch), Y向上(Yaw), Z向前(Roll)
+            // 视不同模型而定，可能需要调整符号映射。这里提供一种常见的转换映射：
+            Quaternion headPnP = Quaternion.Euler(pnpPose.pitch, -pnpPose.yaw, -pnpPose.roll);
 
-        // 3. 左臂 (Left Arm)
+            if (boneTransforms.ContainsKey(HumanBodyBones.Neck))
+            {
+                // 将高精度旋转直接应用到颈部或头部
+                boneTransforms[HumanBodyBones.Neck].rotation = headPnP;
+            }
+        }
+        else
+        {
+            // Fallback: 如果没有 PnP，退回之前的粗略鼻子朝向算法
+            Vector3 mpNose = mpPoints[0];
+            ApplyRotation(HumanBodyBones.Neck, mpMidShoulder, mpNose, spineForward);
+        }
+
+        // 4. 左臂 (Left Arm)
         // UpperArm (肩 -> 肘)，使用 (肩, 肘, 腕) 所在的平面计算法线 (Roll约束)
         Vector3 lArmNormal = Vector3.Cross(mpPoints[13] - mpPoints[11], mpPoints[15] - mpPoints[13]).normalized;
         ApplyRotation(HumanBodyBones.LeftUpperArm, mpPoints[11], mpPoints[13], lArmNormal);
