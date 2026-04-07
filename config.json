@@ -1,4 +1,8 @@
 {
+    "input_mode": "camera",
+    "camera_index": 0,
+    "video_path": "dance.mp4",
+    "video_loop": true,
     "min_cutoff": 0.5,
     "beta": 0.01,
     "d_cutoff": 1.0,
@@ -7,5 +11,8 @@
     "udp_port": 7001,
     "flip_x": false,
     "flip_y": false,
-    "flip_z": false
+    "flip_z": false,
+    "enable_global_depth": true,
+    "ref_shoulder_width_m": 0.4,
+    "camera_focal_length_px": 800.0
 }

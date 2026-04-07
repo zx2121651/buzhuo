@@ -41,6 +41,8 @@ class VisionCaptureThread(QThread):
         self.world_lh_filter = PoseFilterManager(21, min_c, beta, d_c)
         self.world_rh_filter = PoseFilterManager(21, min_c, beta, d_c)
 
+        self.global_root_filter = PoseFilterManager(1, min_c, beta, d_c)
+
     def update_config(self, new_config: dict):
         self.current_config = new_config.copy()
         min_c = new_config.get("min_cutoff", 0.5)
@@ -56,20 +58,68 @@ class VisionCaptureThread(QThread):
             self.world_face_filter,
             self.world_lh_filter,
             self.world_rh_filter,
+            self.global_root_filter,
         ]:
             f.update_params(min_c, beta, d_c)
         print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
 
-    def _process_landmarks(self, landmarks, filter_manager, is_world=False):
+    def _estimate_global_root(self, pose_landmarks):
+        if not self.current_config.get("enable_global_depth", True):
+            return 0.0, 0.0, 0.0
+
+        import math
+
+        l_shoulder = pose_landmarks.landmark[11]
+        r_shoulder = pose_landmarks.landmark[12]
+
+        dx = l_shoulder.x - r_shoulder.x
+        dy = l_shoulder.y - r_shoulder.y
+        norm_width = math.sqrt(dx * dx + dy * dy)
+
+        if norm_width < 0.01:
+            return 0.0, 0.0, 0.0
+
+        pixel_width = norm_width * self.screen_width
+
+        ref_width_m = self.current_config.get("ref_shoulder_width_m", 0.40)
+        focal_length = self.current_config.get("camera_focal_length_px", 800.0)
+
+        estimated_z = (ref_width_m * focal_length) / pixel_width
+
+        mid_hip_x = (
+            pose_landmarks.landmark[23].x + pose_landmarks.landmark[24].x
+        ) / 2.0
+        mid_hip_y = (
+            pose_landmarks.landmark[23].y + pose_landmarks.landmark[24].y
+        ) / 2.0
+
+        offset_x = estimated_z * (mid_hip_x - 0.5) * self.screen_width / focal_length
+        offset_y = estimated_z * (mid_hip_y - 0.5) * self.screen_height / focal_length
+
+        smoothed_root = self.global_root_filter.process(
+            [(offset_x, offset_y, estimated_z)], time.time()
+        )
+        if not smoothed_root:
+            return 0.0, 0.0, 0.0
+
+        s_x, s_y, s_z = smoothed_root[0]
+        return s_x, s_y, s_z
+
+    def _process_landmarks(
+        self, landmarks, filter_manager, is_world=False, global_offset=(0.0, 0.0, 0.0)
+    ):
         if not landmarks:
             return []
         current_t = time.time()
         raw_points = []
         visibility_list = []
 
+        gx, gy, gz = global_offset
+
         for lm in landmarks.landmark:
             if is_world:
-                raw_points.append((lm.x, lm.y, lm.z))
+                # 叠加全局物理坐标偏移量
+                raw_points.append((lm.x + gx, lm.y + gy, lm.z + gz))
                 visibility_list.append(getattr(lm, "visibility", 1.0))
             else:
                 raw_points.append((lm.x, lm.y, getattr(lm, "z", 0.0)))
@@ -173,6 +223,10 @@ class VisionCaptureThread(QThread):
 
                 if results.pose_landmarks:
                     has_data = True
+                    global_root_offset = self._estimate_global_root(
+                        results.pose_landmarks
+                    )
+
                     ui_data["pose"] = self._process_landmarks(
                         results.pose_landmarks, self.ui_pose_filter, is_world=False
                     )
@@ -181,10 +235,12 @@ class VisionCaptureThread(QThread):
                             results.pose_world_landmarks,
                             self.world_pose_filter,
                             is_world=True,
+                            global_offset=global_root_offset,
                         )
                 else:
                     self.ui_pose_filter.reset()
                     self.world_pose_filter.reset()
+                    self.global_root_filter.reset()
 
                 if results.face_landmarks:
                     ui_data["face"] = self._process_landmarks(
