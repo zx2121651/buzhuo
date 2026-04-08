@@ -44,11 +44,15 @@ public class UDPReceiver : MonoBehaviour
 
     // 存储最新反序列化后的数据
     private Landmark[] currentLandmarks = new Landmark[33];
+    private Landmark[] currentLeftHand = new Landmark[21];
+    private Landmark[] currentRightHand = new Landmark[21];
     private HeadPose currentHeadPose = null;
     private BlendshapesData currentBlendshapes = null;
     private bool hasNewData = false;
 
     public Landmark[] GetCurrentLandmarks() { return currentLandmarks; }
+    public Landmark[] GetCurrentLeftHand() { return currentLeftHand; }
+    public Landmark[] GetCurrentRightHand() { return currentRightHand; }
     public HeadPose GetCurrentHeadPose() { return currentHeadPose; }
     public BlendshapesData GetCurrentBlendshapes() { return currentBlendshapes; }
 
