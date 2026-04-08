@@ -18,12 +18,15 @@ DEFAULT_CONFIG = {
     "flip_y": False,
     "flip_z": False,
     # --- 高阶算法增强 (Algorithm Enhancements) ---
-    "enable_global_depth": True,  # 开启绝对空间位移推算
-    "ref_shoulder_width_m": 0.40,  # 物理标准肩宽参考值 (米)
-    "camera_focal_length_px": 800.0,  # 摄像机等效焦距 (像素)
-    "enable_head_pnp": True,  # 开启高精度头部姿态解算 (PnP)
-    "enable_kinematic_constraints": True,  # 开启防畸变的运动学自适应骨骼缩放 (Kinematic Bone Rescaling)
-    "kinematic_calibration_frames": 30,  # 启动时/重置时，取多少帧的平均值来精确测量真人的四肢长度
+    "enable_global_depth": True,
+    "ref_shoulder_width_m": 0.40,
+    "camera_focal_length_px": 800.0,
+    "enable_head_pnp": True,
+    "enable_kinematic_constraints": True,
+    "kinematic_calibration_frames": 30,
+    "enable_kalman_prediction": True,  # 开启四肢末端的高速卡尔曼惯性预测
+    "kalman_process_noise": 0.01,  # 卡尔曼过程噪声(物理信任度，越小越相信惯性)
+    "kalman_measurement_noise": 0.1,  # 卡尔曼测量噪声(摄像头信任度，越大越平滑但延迟高)
 }
 
 

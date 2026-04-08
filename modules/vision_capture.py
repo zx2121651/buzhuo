@@ -6,6 +6,7 @@ import numpy as np
 import mediapipe as mp
 from PySide6.QtCore import QThread, Signal, QPointF
 from one_euro_filter import PoseFilterManager
+from modules.kalman_filter import KalmanPoseFilterManager
 
 # 标准人脸的 3D 参考坐标 (单位: 毫米)
 FACE_3D_MODEL_POINTS = np.array(
@@ -71,6 +72,14 @@ class VisionCaptureThread(QThread):
 
         self.global_root_filter = PoseFilterManager(1, min_c, beta, d_c)
         self.head_pose_filter = PoseFilterManager(1, min_c, beta, d_c)
+
+        # 混合双轨滤波 (Hybrid Filtering)：初始化卡尔曼滤波器，专门接管四肢末端 4 个高动态节点
+        # 左手腕(15), 右手腕(16), 左脚踝(27), 右脚踝(28)
+        kf_pn = conf.get("kalman_process_noise", 0.01)
+        kf_mn = conf.get("kalman_measurement_noise", 0.1)
+        self.ui_kalman_filter = KalmanPoseFilterManager(4, kf_pn, kf_mn)
+        self.world_kalman_filter = KalmanPoseFilterManager(4, kf_pn, kf_mn)
+        self.kalman_indices = [15, 16, 27, 28]
 
     def update_config(self, new_config: dict):
         self.current_config = new_config.copy()
