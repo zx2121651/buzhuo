@@ -15,5 +15,7 @@
     "enable_global_depth": true,
     "ref_shoulder_width_m": 0.4,
     "camera_focal_length_px": 800.0,
-    "enable_head_pnp": true
+    "enable_head_pnp": true,
+    "enable_kinematic_constraints": true,
+    "kinematic_calibration_frames": 30
 }

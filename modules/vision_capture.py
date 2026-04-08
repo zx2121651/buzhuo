@@ -41,6 +41,19 @@ class VisionCaptureThread(QThread):
         self._init_filters(self.current_config)
         self.mp_holistic = mp.solutions.holistic
 
+        self.calibration_count = 0
+        self.fixed_bone_lengths = {}
+        self.kinematic_chains = [
+            (11, 13),  # 左肩(11) -> 左肘(13)
+            (13, 15),  # 左肘(13) -> 左腕(15)
+            (12, 14),  # 右肩(12) -> 右肘(14)
+            (14, 16),  # 右肘(14) -> 右腕(16)
+            (23, 25),  # 左髋(23) -> 左膝(25)
+            (25, 27),  # 左膝(25) -> 左踝(27)
+            (24, 26),  # 右髋(24) -> 右膝(26)
+            (26, 28),  # 右膝(26) -> 右踝(28)
+        ]
+
     def _init_filters(self, conf):
         min_c = conf.get("min_cutoff", 0.5)
         beta = conf.get("beta", 0.01)
