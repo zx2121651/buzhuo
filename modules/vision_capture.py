@@ -72,14 +72,14 @@ class VisionCaptureThread(QThread):
 
         self.global_root_filter = PoseFilterManager(1, min_c, beta, d_c)
         self.head_pose_filter = PoseFilterManager(1, min_c, beta, d_c)
-
-        # 混合双轨滤波 (Hybrid Filtering)：初始化卡尔曼滤波器，专门接管四肢末端 4 个高动态节点
-        # 左手腕(15), 右手腕(16), 左脚踝(27), 右脚踝(28)
         kf_pn = conf.get("kalman_process_noise", 0.01)
         kf_mn = conf.get("kalman_measurement_noise", 0.1)
         self.ui_kalman_filter = KalmanPoseFilterManager(4, kf_pn, kf_mn)
         self.world_kalman_filter = KalmanPoseFilterManager(4, kf_pn, kf_mn)
         self.kalman_indices = [15, 16, 27, 28]
+
+        # 专门用于平滑面部 Blendshapes 权重 (JawOpen, Smile, EyeBlinkLeft, EyeBlinkRight)
+        self.blendshape_filter = PoseFilterManager(4, min_c, beta, d_c)
 
     def update_config(self, new_config: dict):
         self.current_config = new_config.copy()
@@ -100,6 +100,93 @@ class VisionCaptureThread(QThread):
         ]:
             f.update_params(min_c, beta, d_c)
         print(f"[Vision] Filter params updated: min_cutoff={min_c}, beta={beta}")
+
+    def _solve_blendshapes(self, face_landmarks):
+        """
+        面部 Blendshapes 基础解算器。
+        通过计算面部特定网格点之间的相对距离（并且通过归一化面部尺寸来保证尺度不变性），
+        量化出 JawOpen (张嘴)、Smile (微笑)、EyeBlinkLeft (左眼眨眼)、EyeBlinkRight (右眼眨眼) 的权重值 (0~1)。
+        """
+        if not self.current_config.get("enable_face_blendshapes", True):
+            return {
+                "JawOpen": 0.0,
+                "Smile": 0.0,
+                "EyeBlinkLeft": 0.0,
+                "EyeBlinkRight": 0.0,
+            }
+
+        import math
+
+        lm = face_landmarks.landmark
+
+        # 辅助函数：计算两点间的欧氏距离
+        def dist(p1, p2):
+            dx = lm[p1].x - lm[p2].x
+            dy = lm[p1].y - lm[p2].y
+            dz = lm[p1].z - lm[p2].z
+            return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+        # 1. 提取面部尺度参考值 (Scale Invariant)
+        face_height = dist(10, 152)  # 额头到下巴的距离
+        face_width = dist(234, 454)  # 左右耳根的距离
+        if face_height < 1e-4 or face_width < 1e-4:
+            return {
+                "JawOpen": 0.0,
+                "Smile": 0.0,
+                "EyeBlinkLeft": 0.0,
+                "EyeBlinkRight": 0.0,
+            }
+
+        # 2. 计算 JawOpen (张嘴)
+        # 上嘴唇内部中点(13) 到 下嘴唇内部中点(14) 的距离
+        mouth_open = dist(13, 14) / face_height
+        # 阈值映射: 0.01 是闭嘴, 0.1 是大张嘴
+        jaw_open_weight = np.clip((mouth_open - 0.01) / (0.1 - 0.01), 0.0, 1.0)
+
+        # 3. 计算 Smile (微笑)
+        # 左右嘴角(61, 291) 的距离
+        mouth_width = dist(61, 291) / face_width
+        # 阈值映射: 0.35 是正常脸, 0.45 是大笑
+        smile_weight = np.clip((mouth_width - 0.35) / (0.45 - 0.35), 0.0, 1.0)
+
+        # 4. 计算 EyeBlinkLeft & EyeBlinkRight (眨眼)
+        # 左眼上下眼睑距离 (159 到 145)
+        left_eye_open = dist(159, 145) / face_height
+        # 右眼上下眼睑距离 (386 到 374) (注意在镜像画面中左右的相对定义)
+        right_eye_open = dist(386, 374) / face_height
+
+        # 阈值映射: 0.02 认为眼睛是闭着的(权重1.0), 0.04 认为是睁开的(权重0.0)
+        # 注意眨眼的逻辑是反过来的：距离越小，眨眼权重越大！
+        blink_left_weight = 1.0 - np.clip(
+            (left_eye_open - 0.02) / (0.04 - 0.02), 0.0, 1.0
+        )
+        blink_right_weight = 1.0 - np.clip(
+            (right_eye_open - 0.02) / (0.04 - 0.02), 0.0, 1.0
+        )
+
+        # 5. 使用专用的 1€ Filter 平滑表情权重防抽搐
+        # 这里我们将这 4 个标量包装成 4 个点的伪坐标，仅利用 x 轴传递数据
+        raw_weights = [
+            (jaw_open_weight, 0, 0),
+            (smile_weight, 0, 0),
+            (blink_left_weight, 0, 0),
+            (blink_right_weight, 0, 0),
+        ]
+        smoothed_weights = self.blendshape_filter.process(raw_weights, time.time())
+        if not smoothed_weights:
+            return {
+                "JawOpen": 0.0,
+                "Smile": 0.0,
+                "EyeBlinkLeft": 0.0,
+                "EyeBlinkRight": 0.0,
+            }
+
+        return {
+            "JawOpen": float(smoothed_weights[0][0]),
+            "Smile": float(smoothed_weights[1][0]),
+            "EyeBlinkLeft": float(smoothed_weights[2][0]),
+            "EyeBlinkRight": float(smoothed_weights[3][0]),
+        }
 
     def _solve_head_pnp(self, face_landmarks):
         if not self.current_config.get("enable_head_pnp", True):

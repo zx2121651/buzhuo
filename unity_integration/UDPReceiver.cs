@@ -8,11 +8,12 @@ using UnityEngine;
 
 // 1. 定义与 Python 端匹配的数据结构
 [Serializable]
-public class HeadPose
+public class BlendshapesData
 {
-    public float pitch;
-    public float yaw;
-    public float roll;
+    public float JawOpen;
+    public float Smile;
+    public float EyeBlinkLeft;
+    public float EyeBlinkRight;
 }
 
 [Serializable]
@@ -22,7 +23,8 @@ public class LandmarkWrapper
     public List<Landmark> face;
     public List<Landmark> left_hand;
     public List<Landmark> right_hand;
-    public HeadPose head_pose; // 接收高精度头部欧拉角
+    public HeadPose head_pose;
+    public BlendshapesData blendshapes; // 接收表情权重
 }
 
 public class UDPReceiver : MonoBehaviour
@@ -43,11 +45,12 @@ public class UDPReceiver : MonoBehaviour
     // 存储最新反序列化后的数据
     private Landmark[] currentLandmarks = new Landmark[33];
     private HeadPose currentHeadPose = null;
+    private BlendshapesData currentBlendshapes = null;
     private bool hasNewData = false;
 
-    // 提供给外部脚本访问的 API
     public Landmark[] GetCurrentLandmarks() { return currentLandmarks; }
     public HeadPose GetCurrentHeadPose() { return currentHeadPose; }
+    public BlendshapesData GetCurrentBlendshapes() { return currentBlendshapes; }
 
     // 存储生成的 33 个 Sphere
     private Transform[] jointTransforms = new Transform[33];

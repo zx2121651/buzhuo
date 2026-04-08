@@ -139,7 +139,7 @@ class TransparentOverlay(QWidget):
             )
         else:
             painter.setPen(QColor(255, 100, 100))
-            painter.drawText(30, y_offset, f"绝对深度(Global Z): 关闭 (原地踏步)")
+            painter.drawText(30, y_offset, "绝对深度(Global Z): 关闭 (原地踏步)")
             painter.setPen(QColor(255, 255, 255))
         # --- End HUD Panel ---
 

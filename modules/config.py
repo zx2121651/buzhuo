@@ -24,9 +24,10 @@ DEFAULT_CONFIG = {
     "enable_head_pnp": True,
     "enable_kinematic_constraints": True,
     "kinematic_calibration_frames": 30,
-    "enable_kalman_prediction": True,  # 开启四肢末端的高速卡尔曼惯性预测
-    "kalman_process_noise": 0.01,  # 卡尔曼过程噪声(物理信任度，越小越相信惯性)
-    "kalman_measurement_noise": 0.1,  # 卡尔曼测量噪声(摄像头信任度，越大越平滑但延迟高)
+    "enable_kalman_prediction": True,
+    "kalman_process_noise": 0.01,
+    "kalman_measurement_noise": 0.1,
+    "enable_face_blendshapes": True,  # 开启基础面部表情解算 (张嘴、微笑、眨眼)
 }
 
 
